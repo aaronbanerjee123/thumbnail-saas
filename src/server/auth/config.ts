@@ -1,8 +1,12 @@
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { type DefaultSession, type NextAuthConfig } from "next-auth";
-import DiscordProvider from "next-auth/providers/discord";
-
+import Credentials from "next-auth/providers/credentials";
+import { signInSchema } from "~/schemas/auth";
 import { db } from "~/server/db";
+import bcrypt from 'bcryptjs'
+import { ZodError } from "zod";
+import { env } from "process";
+import {type JWT} from "next-auth/jwt";
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -19,10 +23,18 @@ declare module "next-auth" {
     } & DefaultSession["user"];
   }
 
+
+
   // interface User {
   //   // ...other properties
   //   // role: UserRole;
   // }
+}
+
+declare module "next-auth/jwt" {
+  interface JWT {
+    id:string;
+  }
 }
 
 /**
@@ -32,7 +44,48 @@ declare module "next-auth" {
  */
 export const authConfig = {
   providers: [
-    DiscordProvider,
+    Credentials({
+      credentials:{
+        email:{},
+        password:{}
+      },
+      async authorize(credentials){
+        try {
+          const {email,password} = await signInSchema.parseAsync(credentials)
+
+          const user = await db.user.findUnique({
+            where:{email:email},
+            select:{
+              password:true,
+              id:true,
+              email:true,
+              name:true
+            }
+          })
+          const validPassword = user && await bcrypt.compare(password, user.password);
+
+          
+          if(!user){
+            throw new Error('User not found')
+          }
+
+          
+          if(!validPassword){
+            return null;
+          }
+
+          return user;
+
+        } catch (error) {
+            if(error instanceof ZodError){
+              return null;
+            }
+
+        }
+        return null;
+
+      },
+    }),
     /**
      * ...add more providers here.
      *
@@ -42,15 +95,27 @@ export const authConfig = {
      *
      * @see https://next-auth.js.org/providers/github
      */
+
+  
   ],
+  pages:{
+    signIn:"/signin"
+  },
+  secret:env.AUTH_SECRET,
+  session:{
+    strategy:"jwt"
+  },
   adapter: PrismaAdapter(db),
   callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+   jwt ({token,user}) {
+    if(user){
+      token.id = user.id!;
+    }
+    return token;
+   },
+   session ({session,token}){
+    session.user.id = token.id;
+    return session;
+   }
   },
 } satisfies NextAuthConfig;
